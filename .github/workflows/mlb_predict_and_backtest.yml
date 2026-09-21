@@ -4,39 +4,40 @@ on:
   workflow_dispatch:
     inputs:
       game_pk:
-        description: "Real MLB StatsAPI game_pk for a game that has not started"
+        description: "MLB gamePk for a game that has not started"
         required: true
         type: string
+  schedule:
+    - cron: "*/30 * * * *"
 
 permissions:
   contents: write
-
-env:
-  GAME_PK: ${{ inputs.game_pk }}
-  # Esta línea le dice a GitHub Actions que use la ruta absoluta del repositorio para buscar módulos de Python
-  PYTHONPATH: ${{ github.workspace }} 
 
 concurrency:
   group: mlb-backtest-ledger-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  predict-and-backtest:
+  pregame:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 60
+    env:
+      GAME_PK: ${{ inputs.game_pk }}
+
     steps:
-      - name: Check out repository and cumulative ledger
+      - name: Check out repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Restore official-response cache
+      - name: Restore MLB cache
         uses: actions/cache@v4
         with:
           path: .cache/mlb-statsapi
@@ -44,19 +45,29 @@ jobs:
           restore-keys: |
             mlb-statsapi-${{ runner.os }}-${{ github.ref_name }}-
 
-      - name: Install locked-compatible project dependencies
-        run: python -m pip install --upgrade pip && python -m pip install .
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
 
-      - name: Validate real pregame game_pk with official MLB StatsAPI
-        run: python scripts/validate_game.py --game-pk "$GAME_PK"
+      - name: Validate game
+        run: |
+          python scripts/validate_game.py \
+            --game-pk "$GAME_PK"
 
-      - name: Train, walk-forward validate, calibrate, and predict
-        run: python scripts/predict.py --game-pk "$GAME_PK" --artifacts artifacts
+      - name: Generate prediction
+        run: |
+          python scripts/predict.py \
+            --game-pk "$GAME_PK" \
+            --artifacts artifacts
 
-      - name: Enforce public-source provenance and fabricated-data prohibition
-        run: python scripts/enforce_real_data.py --prediction artifacts/prediction.json --provenance artifacts/provenance.json
+      - name: Verify official data
+        run: |
+          python scripts/enforce_real_data.py \
+            --prediction artifacts/prediction.json \
+            --provenance artifacts/provenance.json
 
-      - name: Upload immutable pregame artifacts
+      - name: Upload pregame artifacts
         uses: actions/upload-artifact@v4
         with:
           name: pregame-${{ inputs.game_pk }}
@@ -69,33 +80,204 @@ jobs:
           if-no-files-found: error
           retention-days: 90
 
-      - name: Wait until MLB marks the game Final
-        run: python scripts/wait_for_final.py --game-pk "$GAME_PK" --output artifacts/final_feed.json
+      - name: Register pending backtest
+        run: |
+          mkdir -p data/pending
+          cp artifacts/prediction.json \
+            "data/pending/${GAME_PK}.json"
 
-      - name: Backtest against official final boxscore and game feed
-        run: python scripts/backtest.py --prediction artifacts/prediction.json --final-feed artifacts/final_feed.json --ledger data/backtests.csv --output artifacts/backtest_report.json
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Persist cumulative backtest ledger
+          git add -f "data/pending/${GAME_PK}.json"
+          git commit -m "prediction: queue MLB game ${GAME_PK}"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+  postgame:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+
+      - name: Find completed games
+        run: |
+          mkdir -p artifacts data/pending
+          : > artifacts/final_ids.txt
+
+          python - <<'PY'
+          from __future__ import annotations
+
+          import hashlib
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          import requests
+
+          pending_directory = Path("data/pending")
+          artifacts_directory = Path("artifacts")
+          final_ids: list[int] = []
+
+          for prediction_path in sorted(
+              pending_directory.glob("*.json")
+          ):
+              prediction = json.loads(
+                  prediction_path.read_text(encoding="utf-8")
+              )
+              game_pk = int(prediction["game_pk"])
+              url = (
+                  "https://statsapi.mlb.com/api/v1.1/game/"
+                  f"{game_pk}/feed/live"
+              )
+
+              response = requests.get(
+                  url,
+                  headers={
+                      "Accept": "application/json",
+                      "User-Agent": "mlb-hybrid-predictor/1.0",
+                  },
+                  timeout=30,
+              )
+              response.raise_for_status()
+              feed = response.json()
+
+              status = feed.get("gameData", {}).get("status", {})
+              abstract = str(
+                  status.get("abstractGameState", "")
+              )
+              detailed = str(status.get("detailedState", ""))
+
+              print(
+                  f"game_pk={game_pk}: "
+                  f"{abstract or 'Unknown'} / "
+                  f"{detailed or 'Unknown'}"
+              )
+
+              is_final = (
+                  abstract == "Final"
+                  or detailed
+                  in {"Final", "Game Over", "Completed Early"}
+              )
+              if not is_final:
+                  continue
+
+              raw_data = json.dumps(
+                  feed,
+                  sort_keys=True,
+                  separators=(",", ":"),
+                  ensure_ascii=False,
+              ).encode("utf-8")
+
+              final_feed_path = (
+                  artifacts_directory
+                  / f"final_feed_{game_pk}.json"
+              )
+              final_feed_path.write_text(
+                  json.dumps(
+                      feed,
+                      indent=2,
+                      sort_keys=True,
+                      ensure_ascii=False,
+                  ),
+                  encoding="utf-8",
+              )
+
+              provenance = {
+                  "generated_at": datetime.now(
+                      timezone.utc
+                  ).isoformat(),
+                  "source_policy": "official-public-only",
+                  "records": [
+                      {
+                          "url": url,
+                          "fetched_at": datetime.now(
+                              timezone.utc
+                          ).isoformat(),
+                          "sha256": hashlib.sha256(
+                              raw_data
+                          ).hexdigest(),
+                          "cache_hit": False,
+                      }
+                  ],
+              }
+
+              provenance_path = (
+                  artifacts_directory
+                  / f"final_provenance_{game_pk}.json"
+              )
+              provenance_path.write_text(
+                  json.dumps(
+                      provenance,
+                      indent=2,
+                      sort_keys=True,
+                  ),
+                  encoding="utf-8",
+              )
+              final_ids.append(game_pk)
+
+          Path("artifacts/final_ids.txt").write_text(
+              "".join(f"{game_pk}\n" for game_pk in final_ids),
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Backtest completed games
+        run: |
+          while IFS= read -r game_pk; do
+            [ -n "$game_pk" ] || continue
+
+            python scripts/backtest.py \
+              --prediction "data/pending/${game_pk}.json" \
+              --final-feed "artifacts/final_feed_${game_pk}.json" \
+              --ledger data/backtests.csv \
+              --output "artifacts/backtest_report_${game_pk}.json"
+
+            rm "data/pending/${game_pk}.json"
+          done < artifacts/final_ids.txt
+
+      - name: Persist backtests
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@://github.com"
-          git add -f data/backtests.csv
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -A data/backtests.csv data/pending
+
           if git diff --cached --quiet; then
-            echo "No ledger change"
-          else
-            git commit -m "backtest: score MLB game ${GAME_PK}"
-            git pull --rebase origin "${GITHUB_REF_NAME}"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
+            echo "No completed games"
+            exit 0
           fi
 
-      - name: Upload official postgame artifacts
+          git commit -m "backtest: record completed MLB games"
+          git pull --rebase origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Upload postgame artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: postgame-${{ inputs.game_pk }}
+          name: postgame-${{ github.run_id }}
           path: |
-            artifacts/final_feed.json
-            artifacts/final_provenance.json
-            artifacts/backtest_report.json
+            artifacts/final_feed_*.json
+            artifacts/final_provenance_*.json
+            artifacts/backtest_report_*.json
             data/backtests.csv
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 90
