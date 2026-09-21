@@ -1,0 +1,59 @@
+http:
+  base_url: "https://statsapi.mlb.com"
+  timeout_seconds: 30
+  retries: 5
+  requests_per_second: 4.0
+  cache_directory: ".cache/mlb-statsapi"
+
+training:
+  history_days: 730
+  max_training_games: 900
+  minimum_training_rows: 300
+  minimum_team_games: 12
+  calibration_fraction: 0.20
+  walk_forward_folds: 3
+  random_seed: 2025
+
+features:
+  rolling_games: 20
+  starter_outings: 5
+  minimum_starter_outings: 2
+  bullpen_days: 3
+  minimum_venue_games: 5
+  pythagorean_exponent: 1.83
+  fip_constant: 3.10
+  woba_weights:
+    walk: 0.690
+    hit_by_pitch: 0.720
+    single: 0.880
+    double: 1.247
+    triple: 1.578
+    home_run: 2.031
+
+models:
+  xgboost:
+    n_estimators: 350
+    max_depth: 4
+    learning_rate: 0.035
+    subsample: 0.85
+    colsample_bytree: 0.85
+    reg_lambda: 2.0
+  random_forest:
+    n_estimators: 600
+    min_samples_leaf: 5
+    max_features: "sqrt"
+  catboost:
+    iterations: 500
+    depth: 6
+    learning_rate: 0.035
+    l2_leaf_reg: 4.0
+
+markets:
+  home_run_line: -1.5
+  total_line: 8.5
+  maximum_runs_for_distribution: 30
+
+workflow:
+  poll_seconds: 180
+  maximum_wait_minutes: 340
+
