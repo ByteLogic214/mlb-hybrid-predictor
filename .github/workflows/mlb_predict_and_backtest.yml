@@ -13,7 +13,8 @@ permissions:
 
 env:
   GAME_PK: ${{ inputs.game_pk }}
-  PYTHONPATH: . # Arregla el ModuleNotFoundError agregando la raíz al path de Python
+  # Esta línea le dice a GitHub Actions que use la ruta absoluta del repositorio para buscar módulos de Python
+  PYTHONPATH: ${{ github.workspace }} 
 
 concurrency:
   group: mlb-backtest-ledger-${{ github.ref }}
@@ -77,7 +78,7 @@ jobs:
       - name: Persist cumulative backtest ledger
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@://github.com"
           git add -f data/backtests.csv
           if git diff --cached --quiet; then
             echo "No ledger change"
