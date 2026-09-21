@@ -1,0 +1,90 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlb-hybrid-predictor"
+version = "1.0.0"
+description = "Leakage-safe MLB pregame probabilities and official postgame backtesting"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = {text = "MIT"}
+authors = [{name = "MLB Hybrid Predictor contributors"}]
+dependencies = [
+  "catboost>=1.2.8,<2",
+  "joblib>=1.4,<2",
+  "numpy>=1.26,<2.4",
+  "pandas>=2.2,<3",
+  "PyYAML>=6.0,<7",
+  "requests>=2.32,<3",
+  "scikit-learn>=1.5,<2",
+  "scipy>=1.13,<2",
+  "statsmodels>=0.14.4,<1",
+  "xgboost>=2.1,<4",
+]
+
+[project.optional-dependencies]
+lstm = ["torch>=2.4,<3"]
+dev = [
+  "mypy>=1.11,<2",
+  "pandas-stubs>=2.2,<3",
+  "pytest>=8.3,<9",
+  "ruff>=0.9,<1",
+  "types-PyYAML>=6.0,<7",
+  "types-requests>=2.32,<3",
+]
+
+[project.scripts]
+mlb-validate-game = "pipeline.cli:validate_main"
+mlb-predict = "pipeline.cli:predict_main"
+mlb-wait-final = "pipeline.cli:wait_main"
+mlb-backtest = "pipeline.cli:backtest_main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q --strict-markers"
+testpaths = ["tests"]
+markers = ["live: calls an official public endpoint and requires explicit opt-in"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+files = ["src"]
+mypy_path = "src"
+no_site_packages = true
+
+[[tool.mypy.overrides]]
+module = [
+  "catboost",
+  "joblib",
+  "pandas",
+  "requests",
+  "requests.*",
+  "scipy.*",
+  "sklearn.*",
+  "statsmodels.*",
+  "torch",
+  "torch.*",
+  "urllib3.*",
+  "xgboost",
+  "yaml",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
+ignore_missing_imports = true
