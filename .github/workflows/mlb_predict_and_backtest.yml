@@ -13,6 +13,7 @@ permissions:
 
 env:
   GAME_PK: ${{ inputs.game_pk }}
+  PYTHONPATH: . # Arregla el ModuleNotFoundError agregando la raíz al path de Python
 
 concurrency:
   group: mlb-backtest-ledger-${{ github.ref }}
