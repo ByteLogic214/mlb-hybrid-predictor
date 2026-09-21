@@ -1,0 +1,99 @@
+name: MLB pregame prediction and official backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      game_pk:
+        description: "Real MLB StatsAPI game_pk for a game that has not started"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  GAME_PK: ${{ inputs.game_pk }}
+
+concurrency:
+  group: mlb-backtest-ledger-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  predict-and-backtest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Check out repository and cumulative ledger
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Restore official-response cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/mlb-statsapi
+          key: mlb-statsapi-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            mlb-statsapi-${{ runner.os }}-${{ github.ref_name }}-
+
+      - name: Install locked-compatible project dependencies
+        run: python -m pip install --upgrade pip && python -m pip install .
+
+      - name: Validate real pregame game_pk with official MLB StatsAPI
+        run: python scripts/validate_game.py --game-pk "$GAME_PK"
+
+      - name: Train, walk-forward validate, calibrate, and predict
+        run: python scripts/predict.py --game-pk "$GAME_PK" --artifacts artifacts
+
+      - name: Enforce public-source provenance and fabricated-data prohibition
+        run: python scripts/enforce_real_data.py --prediction artifacts/prediction.json --provenance artifacts/provenance.json
+
+      - name: Upload immutable pregame artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pregame-${{ inputs.game_pk }}
+          path: |
+            artifacts/prediction.json
+            artifacts/evaluation.json
+            artifacts/provenance.json
+            artifacts/training_dataset.csv
+            artifacts/*.joblib
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Wait until MLB marks the game Final
+        run: python scripts/wait_for_final.py --game-pk "$GAME_PK" --output artifacts/final_feed.json
+
+      - name: Backtest against official final boxscore and game feed
+        run: python scripts/backtest.py --prediction artifacts/prediction.json --final-feed artifacts/final_feed.json --ledger data/backtests.csv --output artifacts/backtest_report.json
+
+      - name: Persist cumulative backtest ledger
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f data/backtests.csv
+          if git diff --cached --quiet; then
+            echo "No ledger change"
+          else
+            git commit -m "backtest: score MLB game ${GAME_PK}"
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+            git push origin "HEAD:${GITHUB_REF_NAME}"
+          fi
+
+      - name: Upload official postgame artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgame-${{ inputs.game_pk }}
+          path: |
+            artifacts/final_feed.json
+            artifacts/final_provenance.json
+            artifacts/backtest_report.json
+            data/backtests.csv
+          if-no-files-found: error
+          retention-days: 90
